@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.database import engine, Base
-from app.routers import common, operation, dataset, analytics
+from app.routers import common, operation, dataset, analytics, recalculation
 
 
 def create_tables():
@@ -85,6 +85,7 @@ app.include_router(common.router, prefix=api_prefix)
 app.include_router(operation.router, prefix=api_prefix)
 app.include_router(dataset.router, prefix=api_prefix)
 app.include_router(analytics.router, prefix=api_prefix)
+app.include_router(recalculation.router, prefix=api_prefix)
 
 
 @app.get("/", tags=["首页"])

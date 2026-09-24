@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Float, Boolean, JSON
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Float, Boolean, JSON, UniqueConstraint
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
@@ -224,3 +224,129 @@ class DatasetSubscription(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     dataset = relationship("Dataset", back_populates="subscriptions")
+
+
+class QualityPolicyRecord(Base):
+    """质量评分策略的持久化版本。发布后参数与指纹冻结。"""
+
+    __tablename__ = "quality_policies"
+
+    id = Column(Integer, primary_key=True, index=True)
+    revision = Column(Integer, nullable=False, unique=True, index=True)
+    name = Column(String(100), nullable=False)
+    completeness_weight = Column(Float, nullable=False)
+    annotation_weight = Column(Float, nullable=False)
+    grade_a_threshold = Column(Float, nullable=False)
+    grade_b_threshold = Column(Float, nullable=False)
+    grade_c_threshold = Column(Float, nullable=False)
+    fingerprint = Column(String(64), nullable=False, index=True)
+    is_active = Column(Boolean, nullable=False, default=True, index=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    recalculation_jobs = relationship("RecalculationJobRecord", back_populates="policy")
+
+
+class RecalculationJobRecord(Base):
+    """一次历史作业批量重算的元数据与检查点。"""
+
+    __tablename__ = "recalculation_jobs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    policy_revision = Column(Integer, ForeignKey("quality_policies.id"), nullable=False, index=True)
+    status = Column(String(20), nullable=False, default="pending", index=True)
+    total_count = Column(Integer, nullable=False, default=0)
+    claimed_count = Column(Integer, nullable=False, default=0)
+    next_batch_sequence = Column(Integer, nullable=False, default=0)
+    succeeded_count = Column(Integer, nullable=False, default=0)
+    skipped_count = Column(Integer, nullable=False, default=0)
+    failed_count = Column(Integer, nullable=False, default=0)
+    last_processed_id = Column(Integer, nullable=True)
+    error = Column(Text, nullable=True)
+    created_by = Column(String(100), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    paused_at = Column(DateTime(timezone=True), nullable=True)
+    resumed_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    cancelled_at = Column(DateTime(timezone=True), nullable=True)
+
+    scope = Column(JSON, nullable=False)
+    batches = relationship(
+        "RecalculationBatchRecord",
+        back_populates="job",
+        cascade="all, delete-orphan",
+        order_by="RecalculationBatchRecord.sequence",
+    )
+    units = relationship(
+        "RecalculationUnitRecord",
+        back_populates="job",
+        cascade="all, delete-orphan",
+        order_by="RecalculationUnitRecord.operation_id",
+    )
+    policy = relationship("QualityPolicyRecord", back_populates="recalculation_jobs")
+
+
+class RecalculationBatchRecord(Base):
+    """工作单元领取/回报的批次记录，支撑每批成功/跳过/失败原因查询。"""
+
+    __tablename__ = "recalculation_batches"
+
+    id = Column(Integer, primary_key=True, index=True)
+    job_id = Column(Integer, ForeignKey("recalculation_jobs.id"), nullable=False, index=True)
+    sequence = Column(Integer, nullable=False)
+    status = Column(String(20), nullable=False, default="running")
+    claim_token = Column(String(32), nullable=True)
+    claimed_by = Column(String(100), nullable=True)
+    outcome_count = Column(Integer, nullable=False, default=0)
+    success_count = Column(Integer, nullable=False, default=0)
+    skipped_count = Column(Integer, nullable=False, default=0)
+    failed_count = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    finished_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (UniqueConstraint("job_id", "sequence", name="uq_recalc_batch_seq"),)
+
+    job = relationship("RecalculationJobRecord", back_populates="batches")
+    outcomes = relationship(
+        "RecalculationOutcomeRecord",
+        back_populates="batch",
+        cascade="all, delete-orphan",
+        order_by="RecalculationOutcomeRecord.operation_id",
+    )
+
+
+class RecalculationUnitRecord(Base):
+    """单个作业的领取状态：领取时行锁占位，重复领取不能二次写入。"""
+
+    __tablename__ = "recalculation_units"
+
+    id = Column(Integer, primary_key=True, index=True)
+    job_id = Column(Integer, ForeignKey("recalculation_jobs.id"), nullable=False, index=True)
+    operation_id = Column(Integer, nullable=False, index=True)
+    status = Column(String(20), nullable=False, default="pending", index=True)
+    batch_id = Column(Integer, ForeignKey("recalculation_batches.id"), nullable=True)
+    claim_token = Column(String(32), nullable=True)
+    claimed_by = Column(String(100), nullable=True)
+    claimed_at = Column(DateTime(timezone=True), nullable=True)
+    finished_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (UniqueConstraint("job_id", "operation_id", name="uq_recalc_unit_op"),)
+
+    job = relationship("RecalculationJobRecord", back_populates="units")
+
+
+class RecalculationOutcomeRecord(Base):
+    """单项处理结果（成功/跳过/失败），失败原因逐行留存。"""
+
+    __tablename__ = "recalculation_outcomes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    batch_id = Column(Integer, ForeignKey("recalculation_batches.id"), nullable=False, index=True)
+    operation_id = Column(Integer, nullable=False, index=True)
+    result = Column(String(20), nullable=False, index=True)
+    reason = Column(Text, nullable=True)
+    before_grade = Column(String(10), nullable=True)
+    after_grade = Column(String(10), nullable=True)
+    recorded_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    batch = relationship("RecalculationBatchRecord", back_populates="outcomes")
