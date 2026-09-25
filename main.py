@@ -1,9 +1,12 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.database import engine, Base
-from app.routers import common, operation, dataset, analytics
+from app.database import engine, Base, SessionLocal
+from app.routers import common, operation, dataset, analytics, recalc
+from app.services.recalc import recalc_manager
 
 
 def create_tables():
@@ -16,6 +19,18 @@ def create_tables():
 
 
 create_tables()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # 进程重启后从持久化检查点恢复：崩溃时处于领取状态的单元重置为待领取。
+    db = SessionLocal()
+    try:
+        recalc_manager.recover(db)
+    finally:
+        db.close()
+    yield
+
 
 app = FastAPI(
     title=settings.APP_NAME,
@@ -61,6 +76,12 @@ app = FastAPI(
 ### 数据质量分级
 - 按完整度和标注质量自动评分分级（A/B/C/D）
 
+### 历史数据重算
+- 策略调整后创建重算作业，创建时冻结策略与筛选范围
+- 工作单元按稳定顺序领取，重复领取不会二次写入
+- 支持暂停、继续、取消，已完成进度保留
+- 进程重启后从持久化检查点恢复，可按批查询成功、跳过和失败原因
+
 ### 统计分析
 - 按机型、场景统计数据量
 - 标注完成率、复用率
@@ -68,7 +89,8 @@ app = FastAPI(
 - 按审核状态统计（待审/已发布等）
     """,
     docs_url="/docs",
-    redoc_url="/redoc"
+    redoc_url="/redoc",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -85,6 +107,7 @@ app.include_router(common.router, prefix=api_prefix)
 app.include_router(operation.router, prefix=api_prefix)
 app.include_router(dataset.router, prefix=api_prefix)
 app.include_router(analytics.router, prefix=api_prefix)
+app.include_router(recalc.router, prefix=api_prefix)
 
 
 @app.get("/", tags=["首页"])

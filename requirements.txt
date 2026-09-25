@@ -4,3 +4,6 @@ sqlalchemy==2.0.25
 pydantic==2.5.3
 pydantic-settings==2.1.0
 python-multipart==0.0.6
+# 测试依赖：pytest 运行测试，httpx 供 FastAPI TestClient 使用（starlette 0.35 需要 httpx<0.28）
+pytest
+httpx<0.28

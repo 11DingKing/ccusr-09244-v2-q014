@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Float, Boolean, JSON
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Float, Boolean, JSON, UniqueConstraint
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
@@ -224,3 +224,86 @@ class DatasetSubscription(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     dataset = relationship("Dataset", back_populates="subscriptions")
+
+
+class RecalcJob(Base):
+    """历史作业质量重算作业。创建时冻结策略快照与筛选范围，进度持久化以便重启续跑。"""
+
+    __tablename__ = "recalc_jobs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(200), nullable=False)
+    status = Column(String(20), nullable=False, default="pending", index=True)
+
+    policy_snapshot = Column(JSON, nullable=False)
+    filters = Column(JSON, nullable=False, default=dict)
+    batch_size = Column(Integer, nullable=False, default=50)
+    lease_seconds = Column(Integer, nullable=False, default=300)
+    policy_expires_at = Column(DateTime(timezone=True), nullable=True)
+
+    total_units = Column(Integer, nullable=False, default=0)
+    total_items = Column(Integer, nullable=False, default=0)
+    completed_units = Column(Integer, nullable=False, default=0)
+    failed_units = Column(Integer, nullable=False, default=0)
+    skipped_units = Column(Integer, nullable=False, default=0)
+    success_items = Column(Integer, nullable=False, default=0)
+    failed_items = Column(Integer, nullable=False, default=0)
+    skipped_items = Column(Integer, nullable=False, default=0)
+
+    error = Column(Text, nullable=True)
+    created_by = Column(String(100), nullable=True)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    finished_at = Column(DateTime(timezone=True), nullable=True)
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    units = relationship("RecalcUnit", back_populates="job", cascade="all, delete-orphan")
+
+
+class RecalcUnit(Base):
+    """一个重算工作单元：按作业数据 ID 升序切出的一批记录，携带领取令牌与租约。"""
+
+    __tablename__ = "recalc_units"
+    __table_args__ = (UniqueConstraint("job_id", "unit_index", name="uq_recalc_unit_index"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    job_id = Column(Integer, ForeignKey("recalc_jobs.id"), nullable=False, index=True)
+    unit_index = Column(Integer, nullable=False)
+    status = Column(String(20), nullable=False, default="pending", index=True)
+
+    worker_id = Column(String(100), nullable=True)
+    claim_token = Column(String(64), nullable=True, index=True)
+    claimed_at = Column(DateTime(timezone=True), nullable=True)
+    lease_expires_at = Column(DateTime(timezone=True), nullable=True)
+    finished_at = Column(DateTime(timezone=True), nullable=True)
+    attempts = Column(Integer, nullable=False, default=0)
+    reason = Column(Text, nullable=True)
+
+    success_count = Column(Integer, nullable=False, default=0)
+    skipped_count = Column(Integer, nullable=False, default=0)
+    failed_count = Column(Integer, nullable=False, default=0)
+
+    job = relationship("RecalcJob", back_populates="units")
+    items = relationship("RecalcItem", back_populates="unit", cascade="all, delete-orphan")
+
+
+class RecalcItem(Base):
+    """工作单元内的单条作业数据重算结果，记录成功、跳过和失败原因。"""
+
+    __tablename__ = "recalc_items"
+    __table_args__ = (
+        UniqueConstraint("job_id", "operation_id", name="uq_recalc_item_operation"),
+        UniqueConstraint("unit_id", "operation_id", name="uq_recalc_item_unit_operation"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    job_id = Column(Integer, ForeignKey("recalc_jobs.id"), nullable=False, index=True)
+    unit_id = Column(Integer, ForeignKey("recalc_units.id"), nullable=False, index=True)
+    operation_id = Column(Integer, nullable=False, index=True)
+
+    status = Column(String(20), nullable=False, default="pending", index=True)
+    reason = Column(Text, nullable=True)
+    finished_at = Column(DateTime(timezone=True), nullable=True)
+
+    unit = relationship("RecalcUnit", back_populates="items")
